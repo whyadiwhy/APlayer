@@ -371,7 +371,7 @@
   <string name="restore_songs">Restore songs</string>
   <string name="restore_songs_tip">Restore songs removed from the library</string>
   <string name="alread_restore_songs">Removed songs have been restored</string>
-  <string name="speed_range_tip">The range is 0.5 to 1.5</string>
+  <string name="speed_range_tip">The range is 0.5 to 2</string>
   <string name="show_displayname">Display filename</string>
   <string name="show_displayname_tip">Replace the title with the filename in the song list</string>
   <string name="accent_color">Accent color</string>
@@ -419,4 +419,10 @@
   <string name="remove_from_blacklist">Remove from blacklist</string>
   <string name="do_you_want_remove_from_blacklist">Do you want to remove %s from the blacklist?</string>
   <string name="blacklist_tip">The content of these folder will be hidden from you library</string>
+  <string name="yes">Yes</string>
+  <string name="no">No</string>
+  <string name="now_playing_screen_background">Background</string>
+  <string name="now_playing_screen_theme">Follow theme</string>
+  <string name="now_playing_screen_cover">Follow album cover</string>
+  <string name="now_playing_screen_custom">Custom</string>
 </resources>

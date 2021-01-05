@@ -5,13 +5,14 @@ import android.app.PendingIntent
 import android.content.*
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.MediaPlayer
 import android.net.Uri
 import android.os.*
 import android.provider.MediaStore
 import android.provider.Settings
-import android.support.annotation.WorkerThread
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
@@ -19,9 +20,11 @@ import android.text.TextUtils
 import android.view.Gravity
 import android.view.ViewGroup
 import android.view.WindowManager
+import androidx.annotation.WorkerThread
+import io.reactivex.functions.Consumer
 import kotlinx.coroutines.*
+import remix.myplayer.App
 import remix.myplayer.R
-import remix.myplayer.appshortcuts.DynamicShortcutManager
 import remix.myplayer.appwidgets.BaseAppwidget
 import remix.myplayer.appwidgets.big.AppWidgetBig
 import remix.myplayer.appwidgets.medium.AppWidgetMedium
@@ -103,9 +106,12 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
   private var prepared = false
 
   /**
-   * 数据是否加载完成
+   * 数据加载
    */
-  private var loadFinished = false
+  @Volatile
+  private var load = 0
+  private val LOADING = 1
+  private val LOAD_SUCCESS = 2
 
   /**
    * 设置播放模式并更新下一首歌曲
@@ -206,6 +212,22 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
   private var audioFocus = false
 
   /**
+   * AudioFocusRequest
+   *
+   * Used by requestAudioFocus and abandonAudioFocusRequest
+   */
+  private val focusRequest = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+    AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN).run {
+      setAudioAttributes(AudioAttributes.Builder().run {
+        setUsage(AudioAttributes.USAGE_MEDIA)
+        setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+        build()
+      })
+      setOnAudioFocusChangeListener(audioFocusListener)
+      build()
+    } else null // 小于 API 26 没有 AudioFocusRequest
+
+  /**
    * 更新相关Activity的Handler
    */
   private val uiHandler = PlaybackHandler(this)
@@ -239,16 +261,13 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
    * 是否显示状态栏歌词
    */
   private var showStatusBarLyric = false
-    set(value) {
-      field = value
-    }
 
   /**
    * 是否显示桌面歌词
    */
   private var showDesktopLyric = false
     set(value) {
-      Timber.v(Throwable("设置桌面歌词开关, old: $field new: $value"))
+//      Timber.v(Throwable("设置桌面歌词开关, old: $field new: $value"))
       field = value
     }
 
@@ -269,13 +288,6 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
     ScreenReceiver()
   }
   private var screenOn = true
-
-  /**
-   * shortcut
-   */
-  private val shortcutManager: DynamicShortcutManager by lazy {
-    DynamicShortcutManager(this)
-  }
 
   /**
    * 音量控制
@@ -355,13 +367,10 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
    * 更新桌面歌词与桌面部件
    */
   private var timer: Timer = Timer()
-  private var desktopLyricTask: LyricTask? = null
   private var desktopWidgetTask: WidgetTask? = null
-
-  /**
-   * 状态栏歌词
-   */
-  private var statusBarLyricTask: StatusBarLyricTask? = null
+  private val lyricTask by lazy {
+    LyricTask()
+  }
 
   /**
    * 创建桌面歌词悬浮窗
@@ -428,15 +437,13 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
     val control = commandIntent?.getIntExtra(EXTRA_CONTROL, -1)
     val action = commandIntent?.action
 
-    Timber.tag(TAG_LIFECYCLE).v("onStartCommand, control: $control action: $action flags: $flags startId: $startId")
+    Timber.v("onStartCommand, control: $control action: $action flags: $flags startId: $startId")
     stop = false
 
     tryLaunch(block = {
       hasPermission = hasPermissions(EXTERNAL_STORAGE_PERMISSIONS)
-      if (!loadFinished && hasPermission) {
-        withContext(Dispatchers.IO) {
-          load()
-        }
+      withContext(Dispatchers.IO) {
+        load()
       }
       handleStartCommandIntent(commandIntent, action)
     })
@@ -529,7 +536,7 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
     val screenFilter = IntentFilter()
     screenFilter.addAction(Intent.ACTION_SCREEN_ON)
     screenFilter.addAction(Intent.ACTION_SCREEN_OFF)
-    registerReceiver(screenReceiver, screenFilter)
+    App.getContext().registerReceiver(screenReceiver, screenFilter)
 
     //监听数据库变化
     contentResolver.registerContentObserver(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, true, mediaStoreObserver)
@@ -544,6 +551,9 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
         exitAfterCompletion = false
       }
     })
+
+    //桌面歌词与状态栏歌词
+    timer.schedule(lyricTask, LYRIC_FIND_INTERVAL, LYRIC_FIND_INTERVAL)
 
     setUpPlayer()
     setUpSession()
@@ -607,7 +617,12 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
   private fun setUpPlayer() {
     mediaPlayer = MediaPlayer()
 
-    mediaPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      mediaPlayer.setAudioAttributes(focusRequest!!.audioAttributes)
+    } else {
+      @Suppress("DEPRECATION")
+      mediaPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC)
+    }
     mediaPlayer.setWakeMode(this, PowerManager.PARTIAL_WAKE_LOCK)
 
     mediaPlayer.setOnCompletionListener { mp ->
@@ -685,9 +700,8 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
       pause(false)
     }
     mediaPlayer.release()
-    loadFinished = false
+    load = 0
     prepared = false
-    shortcutManager.updateContinueShortcut(this)
 
     timer.cancel()
     notify.cancelPlayingNotify()
@@ -696,8 +710,14 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
 
     uiHandler.removeCallbacksAndMessages(null)
     showDesktopLyric = false
+    lyricTask.cancel()
 
-    audioManager.abandonAudioFocus(audioFocusListener)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      audioManager.abandonAudioFocusRequest(focusRequest!!)
+    } else {
+      @Suppress("DEPRECATION")
+      audioManager.abandonAudioFocus(audioFocusListener)
+    }
     mediaSession.isActive = false
     mediaSession.release()
 
@@ -816,10 +836,14 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
    */
   override fun play(fadeIn: Boolean) {
     Timber.v("play: $fadeIn")
-    audioFocus = audioManager.requestAudioFocus(
-        audioFocusListener,
-        AudioManager.STREAM_MUSIC,
-        AudioManager.AUDIOFOCUS_GAIN) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+    audioFocus = (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+      audioManager.requestAudioFocus(focusRequest!!)
+    else {
+      @Suppress("DEPRECATION")
+      audioManager.requestAudioFocus(audioFocusListener,
+          AudioManager.STREAM_MUSIC,
+          AudioManager.AUDIOFOCUS_GAIN)
+    }) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
     if (!audioFocus) {
       return
     }
@@ -1025,11 +1049,6 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
           handleCommand(appwidgetIntent)
         }
       }
-      ACTION_SHORTCUT_CONTINUE_PLAY -> {
-        val continueIntent = Intent(ACTION_CMD)
-        continueIntent.putExtra(EXTRA_CONTROL, Command.TOGGLE)
-        handleCommand(continueIntent)
-      }
       ACTION_SHORTCUT_SHUFFLE -> {
         if (playModel != MODE_SHUFFLE) {
           playModel = MODE_SHUFFLE
@@ -1103,8 +1122,6 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
       return
     }
     updateAppwidget()
-    updateDesktopLyric(false)
-    updateStatusBarLyric()
     updateNotification()
     updateMediaSession(operation)
     // 是否需要保存进度
@@ -1129,14 +1146,13 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
     }
     //更新桌面歌词播放按钮
     desktopLyricView?.setPlayIcon(isPlaying)
-    shortcutManager.updateContinueShortcut(this)
     sendLocalBroadcast(Intent(PLAY_STATE_CHANGE))
   }
 
   /**
    * 接受控制命令 包括暂停、播放、上下首、改版播放模式等
    */
-  private var last = System.currentTimeMillis()
+  private var lastCommandTime = 0
 
   inner class ControlReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
@@ -1156,7 +1172,7 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
     if (control == Command.PLAYSELECTEDSONG || control == Command.PREV || control == Command.NEXT
         || control == Command.TOGGLE || control == Command.PAUSE || control == Command.START) {
       //判断下间隔时间
-      if ((control == Command.PREV || control == Command.NEXT) && System.currentTimeMillis() - last < 500) {
+      if ((control == Command.PREV || control == Command.NEXT) && System.currentTimeMillis() - lastCommandTime < 500) {
         Timber.v("间隔小于500ms")
         return
       }
@@ -1181,7 +1197,6 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
         //          }
         pause(false)
         uiHandler.sendEmptyMessage(REMOVE_DESKTOP_LRC)
-        stopUpdateLyric()
         uiHandler.postDelayed({ notify.cancelPlayingNotify() }, 300)
       }
       //播放选中的歌曲
@@ -1250,17 +1265,11 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
         if (showDesktopLyric != open) {
           showDesktopLyric = open
           ToastUtil.show(service, if (showDesktopLyric) R.string.opened_desktop_lrc else R.string.closed_desktop_lrc)
-          if (showDesktopLyric) {
-            updateDesktopLyric(false)
-          } else {
-            closeDesktopLyric()
-          }
         }
       }
       // 状态栏歌词
       Command.TOGGLE_STATUS_BAR_LRC -> {
         showStatusBarLyric = SPUtil.getValue(service, SETTING_KEY.NAME, SETTING_KEY.STATUSBAR_LYRIC_SHOW, false)
-        updateStatusBarLyric()
       }
       //临时播放一首歌曲
       Command.PLAY_TEMP -> {
@@ -1294,10 +1303,11 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
       }
       //改变歌词源
       Command.CHANGE_LYRIC -> {
-        if (showDesktopLyric) {
-          updateDesktopLyric(true)
-        }
-        updateStatusBarLyric()
+        lyricTask.force = true
+//        if (showDesktopLyric) {
+//          updateDesktopLyric(true)
+//        }
+//        updateStatusBarLyric(true)
       }
       //切换定时器
       Command.TOGGLE_TIMER -> {
@@ -1410,16 +1420,23 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
             return@tryLaunch
           }
           if (requestFocus) {
-            audioFocus = audioManager.requestAudioFocus(audioFocusListener, AudioManager.STREAM_MUSIC,
-                AudioManager.AUDIOFOCUS_GAIN) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+            audioFocus = (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+              audioManager.requestAudioFocus(focusRequest!!)
+            else {
+              @Suppress("DEPRECATION")
+              audioManager.requestAudioFocus(audioFocusListener,
+                  AudioManager.STREAM_MUSIC,
+                  AudioManager.AUDIOFOCUS_GAIN)
+            }) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
             if (!audioFocus) {
               ToastUtil.show(service, getString(R.string.cant_request_audio_focus))
               return@tryLaunch
             }
           }
-          if (isPlaying) {
-            pause(true)
-          }
+
+//          if (isPlaying) {
+//            pause(true)
+//          }
 
           prepared = false
           isLove = withContext(Dispatchers.IO) {
@@ -1500,7 +1517,11 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
   @WorkerThread
   @Synchronized
   private fun load() {
+    if (load >= LOADING || !hasPermission) {
+      return
+    }
     Timber.v("load")
+    load = LOADING
     val isFirst = SPUtil.getValue(this, SETTING_KEY.NAME, SETTING_KEY.FIRST_LOAD, true)
     SPUtil.putValue(this, SETTING_KEY.NAME, SETTING_KEY.FIRST_LOAD, false)
     //第一次启动软件
@@ -1529,9 +1550,9 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
 
     //读取播放列表
     playQueue.restoreIfNecessary()
-    prepare(playQueue.song)
-    loadFinished = true
+    prepare(playQueue.song, false)
 
+    load = LOAD_SUCCESS
     uiHandler.postDelayed({ sendLocalBroadcast(Intent(META_CHANGE)) }, 400)
 
     //打开软件扫描
@@ -1563,34 +1584,6 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
    */
   private fun acquireWakeLock() {
     wakeLock.acquire(if (playQueue.song != EMPTY_SONG) playQueue.song.getDuration() else 30000L)
-  }
-
-  private fun updateDesktopLyric(force: Boolean) {
-    Timber.v("updateDesktopLyric, showDesktopLyric: $showDesktopLyric")
-    if (!showDesktopLyric) {
-      return
-    }
-    if (checkNoPermission()) { //没有权限
-      return
-    }
-    if (!isPlaying) {
-      stopUpdateLyric()
-    } else {
-      //屏幕点亮才更新
-      if (screenOn) {
-        //更新歌词源
-        desktopLyricTask?.force = force
-        startUpdateLyric()
-      }
-    }
-  }
-
-  private fun updateStatusBarLyric() {
-    if (!showStatusBarLyric || !isPlaying || !screenOn) {
-      stopUpdateStatusBarLyric()
-    } else if (showStatusBarLyric && screenOn) {
-      startUpdateStatusBarLyric()
-    }
   }
 
   /**
@@ -1644,33 +1637,6 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
     timer.schedule(desktopWidgetTask, INTERVAL_APPWIDGET, INTERVAL_APPWIDGET)
   }
 
-
-  private fun startUpdateLyric() {
-    if (desktopLyricTask != null) {
-      return
-    }
-    desktopLyricTask = LyricTask()
-    timer.schedule(desktopLyricTask, LYRIC_FIND_INTERVAL, LYRIC_FIND_INTERVAL)
-  }
-
-  private fun stopUpdateLyric() {
-    desktopLyricTask?.cancel()
-    desktopLyricTask = null
-  }
-
-  private fun startUpdateStatusBarLyric() {
-    if (statusBarLyricTask != null) {
-      return
-    }
-    statusBarLyricTask = StatusBarLyricTask()
-    timer.schedule(statusBarLyricTask, LYRIC_FIND_INTERVAL, LYRIC_FIND_INTERVAL)
-  }
-
-  private fun stopUpdateStatusBarLyric() {
-    statusBarLyricTask?.cancel()
-    statusBarLyricTask = null
-  }
-
   private inner class WidgetTask : TimerTask() {
     private val tag: String = WidgetTask::class.java.simpleName
 
@@ -1687,92 +1653,63 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
     }
 
     override fun cancel(): Boolean {
-      Timber.tag(tag).v("停止更新桌面歌词")
+      Timber.tag(tag).v("停止更新桌面部件")
       return super.cancel()
     }
   }
 
   fun setLyricOffset(offset: Int) {
-    desktopLyricTask?.lyricFetcher?.offset = offset
-    statusBarLyricTask?.lyricFetcher?.offset = offset
+    lyricTask.lyricFetcher.offset = offset
   }
 
   private inner class LyricTask : TimerTask() {
-    private var songInLyricTask = EMPTY_SONG
+    private var prev: CharSequence = ""
     val lyricFetcher = LyricFetcher(this@MusicService)
     var force = false
 
     override fun run() {
-      if (!showDesktopLyric) {
-        Timber.tag(TAG_DESKTOP_LYRIC).v("已经关闭桌面歌词")
-        uiHandler.sendEmptyMessage(REMOVE_DESKTOP_LRC)
-        return
+      if(!showDesktopLyric){
+        if (isDesktopLyricShowing) {
+          uiHandler.sendEmptyMessage(REMOVE_DESKTOP_LRC)
+        }
+        if(!showStatusBarLyric || stop){
+          return
+        }
       }
-      if (songInLyricTask != playQueue.song) {
-        songInLyricTask = playQueue.song
-        lyricFetcher.updateLyricRows(songInLyricTask)
-        Timber.tag(TAG_DESKTOP_LYRIC).v("重新获取歌词内容, id: ${songInLyricTask.id}")
-        return
-      }
-      if (force) {
+
+      val currentSong = playQueue.song
+      if (lyricFetcher.song != currentSong || force) {
+        Timber.tag(TAG_DESKTOP_LYRIC).v("重新获取歌词内容, id: ${currentSong.id}")
         force = false
-        lyricFetcher.updateLyricRows(songInLyricTask)
-        Timber.tag(TAG_DESKTOP_LYRIC).v("强制重新获取歌词, id: ${songInLyricTask.id}")
+        lyricFetcher.updateLyricRows(currentSong)
         return
       }
-      //判断权限
-      if (checkNoPermission()) {
-        Timber.v("无悬浮窗权限")
-        return
-      }
-      if (stop) {
-        uiHandler.sendEmptyMessage(REMOVE_DESKTOP_LRC)
-        return
-      }
-      //当前应用在前台
-      if (isAppOnForeground()) {
+
+      val wrapper = lyricFetcher.findCurrentLyric()
+      if (!showDesktopLyric || !screenOn || checkNoPermission() || isAppOnForeground()) {
         if (isDesktopLyricShowing) {
           uiHandler.sendEmptyMessage(REMOVE_DESKTOP_LRC)
         }
       } else {
         if (!isDesktopLyricShowing) {
           uiHandler.removeMessages(CREATE_DESKTOP_LRC)
-          Timber.tag(TAG_DESKTOP_LYRIC).v("请求创建桌面歌词")
           uiHandler.sendEmptyMessageDelayed(CREATE_DESKTOP_LRC, 50)
         } else {
-          uiHandler.obtainMessage(UPDATE_DESKTOP_LRC_CONTENT, lyricFetcher.findCurrentLyric()).sendToTarget()
+          uiHandler.obtainMessage(UPDATE_DESKTOP_LRC_CONTENT, wrapper).sendToTarget()
         }
       }
-    }
 
-    override fun cancel(): Boolean {
-      lyricFetcher.dispose()
-//      uiHandler.sendEmptyMessage(REMOVE_DESKTOP_LRC)
-      Timber.tag(TAG_DESKTOP_LYRIC).v("停止更新桌面歌词")
-      return super.cancel()
-    }
-  }
-
-  private inner class StatusBarLyricTask : TimerTask() {
-    private var songInLyricTask = EMPTY_SONG
-    val lyricFetcher = LyricFetcher(this@MusicService)
-    var prev = ""
-
-    override fun run() {
       if (showStatusBarLyric) {
-        if (songInLyricTask != playQueue.song) {
-          songInLyricTask = playQueue.song
-          lyricFetcher.updateLyricRows(songInLyricTask)
+        if (TextUtils.equals(prev, wrapper.lineOne.content)) {
           return
         }
-        var wrapper = lyricFetcher.findCurrentLyric()
-        if (TextUtils.equals(prev, wrapper.lineOne.content)) return
         prev = wrapper.lineOne.content
         uiHandler.obtainMessage(UPDATE_STATUS_BAR_LRC, wrapper).sendToTarget()
       }
     }
 
     override fun cancel(): Boolean {
+      Timber.tag(TAG_DESKTOP_LYRIC).v("cancel task")
       lyricFetcher.dispose()
       uiHandler.sendEmptyMessage(UPDATE_NOTIFICATION)
       return super.cancel()
@@ -1831,7 +1768,6 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
   private fun closeDesktopLyric() {
     SPUtil.putValue(this, SETTING_KEY.NAME, SETTING_KEY.DESKTOP_LYRIC_SHOW, false)
     showDesktopLyric = false
-    stopUpdateLyric()
     uiHandler.removeMessages(CREATE_DESKTOP_LRC)
     uiHandler.sendEmptyMessage(REMOVE_DESKTOP_LRC)
   }
@@ -1849,7 +1785,6 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
     progressTask = null
   }
 
-
   /**
    * 保存当前播放的进度
    */
@@ -1860,9 +1795,7 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
         SPUtil.putValue(service, SETTING_KEY.NAME, SETTING_KEY.LAST_PLAY_PROGRESS, progress)
       }
     }
-
   }
-
 
   private inner class AudioFocusChangeListener : AudioManager.OnAudioFocusChangeListener {
 
@@ -1913,7 +1846,7 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
   }
 
 
-  private class PlaybackHandler internal constructor(
+  private class PlaybackHandler(
       service: MusicService,
       private val ref: WeakReference<MusicService> = WeakReference(service))
     : Handler() {
@@ -1970,18 +1903,12 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
             Timber.v("启动锁屏页失败: $e")
           }
         }
-        //重新显示桌面歌词
-        updateDesktopLyric(false)
         //重新开始更新桌面部件
         updateAppwidget()
-        updateStatusBarLyric()
       } else {
         screenOn = false
         //停止更新桌面部件
         stopUpdateAppWidget()
-        //关闭桌面歌词
-        stopUpdateLyric()
-        updateStatusBarLyric()
       }
     }
   }
@@ -2043,7 +1970,6 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
     const val ACTION_SHORTCUT_SHUFFLE = "$APLAYER_PACKAGE_NAME.shortcut.shuffle"
     const val ACTION_SHORTCUT_MYLOVE = "$APLAYER_PACKAGE_NAME.shortcut.my_love"
     const val ACTION_SHORTCUT_LASTADDED = "$APLAYER_PACKAGE_NAME.shortcut.last_added"
-    const val ACTION_SHORTCUT_CONTINUE_PLAY = "$APLAYER_PACKAGE_NAME.shortcut.continue_play"
     const val ACTION_LOAD_FINISH = "$APLAYER_PACKAGE_NAME.load.finish"
     const val ACTION_CMD = "$APLAYER_PACKAGE_NAME.cmd"
     const val ACTION_WIDGET_UPDATE = "$APLAYER_PACKAGE_NAME.widget_update"

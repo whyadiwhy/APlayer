@@ -1,7 +1,7 @@
 package remix.myplayer.misc.menu
 
 import android.content.ContextWrapper
-import android.support.v7.widget.PopupMenu
+import androidx.appcompat.widget.PopupMenu
 import android.view.MenuItem
 import android.widget.CompoundButton
 import com.afollestad.materialdialogs.DialogAction.POSITIVE
@@ -164,7 +164,7 @@ class AudioPopupListener<ActivityCallback>(activity: ActivityCallback, private v
 
                   }
 
-                  if (speed > 1.5f || speed < 0.5f) {
+                  if (speed > 2f || speed < 0.5f) {
                     ToastUtil.show(activity, R.string.speed_range_tip)
                     return@InputCallback
                   }

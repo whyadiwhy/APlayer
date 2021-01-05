@@ -14,7 +14,7 @@ import android.graphics.BitmapFactory;
 import android.media.MediaMetadataRetriever;
 import android.net.Uri;
 import android.provider.MediaStore;
-import android.support.annotation.Nullable;
+import androidx.annotation.Nullable;
 import android.text.TextUtils;
 import com.facebook.common.executors.CallerThreadExecutor;
 import com.facebook.common.references.CloseableReference;
@@ -68,7 +68,8 @@ public abstract class ImageUriRequest<T> {
   private static final List<String> BLACKLIST = Arrays
       .asList("https://lastfm-img2.akamaized.net/i/u/300x300/7c58a2e3b889af6f923669cc7744c3de.png",
           "https://lastfm-img2.akamaized.net/i/u/300x300/e1d60ddbcaaa6acdcbba960786f11360.png",
-          "http://p1.music.126.net/l8KRlRa-YLNW0GOBeN6fIA==/17914342951434926.jpg");
+          "http://p1.music.126.net/l8KRlRa-YLNW0GOBeN6fIA==/17914342951434926.jpg",
+          "http://p1.music.126.net/RCIIvR7ull5iQWN-awJ-Aw==/109951165555852156.jpg");
 
   private static final String PREFIX_FILE = "file://";
   private static final String PREFIX_EMBEDDED = "embedded://";
@@ -378,6 +379,38 @@ public abstract class ImageUriRequest<T> {
     return imageUrl;
   }
 
+  protected Observable<Bitmap> getThumbBitmapObservable(final Uri uri){
+    if(uri == null){
+      return Observable.error(new Throwable("uri is null"));
+    }
+
+    return Observable.create(emitter -> {
+      ImageRequest imageRequest =
+          ImageRequestBuilder.newBuilderWithSource(uri)
+              .setResizeOptions(new ResizeOptions(mConfig.getWidth(), mConfig.getHeight()))
+              .build();
+      DataSource<CloseableReference<CloseableImage>> dataSource = Fresco.getImagePipeline()
+          .fetchDecodedImage(imageRequest, App.getContext());
+      dataSource.subscribe(new BaseBitmapDataSubscriber() {
+        @Override
+        protected void onNewResultImpl(Bitmap bitmap) {
+//                            Bitmap result = copy(bitmap);
+          if (bitmap == null) {
+            bitmap = BitmapFactory
+                .decodeResource(App.getContext().getResources(), R.drawable.album_empty_bg_day);
+          }
+          emitter.onNext(bitmap);
+          emitter.onComplete();
+        }
+
+        @Override
+        protected void onFailureImpl(
+            DataSource<CloseableReference<CloseableImage>> dataSource) {
+          emitter.onError(dataSource.getFailureCause());
+        }
+      }, CallerThreadExecutor.getInstance());
+    });
+  }
 
   protected Observable<Bitmap> getThumbBitmapObservable(UriRequest request) {
     return getCoverObservable(request)
