@@ -4,12 +4,12 @@ import static remix.myplayer.ui.adapter.HeaderAdapter.LIST_MODE;
 
 import android.content.Context;
 import android.os.Bundle;
+import android.view.View;
 import androidx.annotation.Nullable;
 import androidx.loader.content.Loader;
 import androidx.recyclerview.widget.DefaultItemAnimator;
 import androidx.recyclerview.widget.GridLayoutManager;
 import androidx.recyclerview.widget.LinearLayoutManager;
-import android.view.View;
 import butterknife.BindView;
 import java.util.List;
 import remix.myplayer.R;

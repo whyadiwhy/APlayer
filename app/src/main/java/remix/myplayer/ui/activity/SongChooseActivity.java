@@ -8,13 +8,13 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.Loader;
 import android.os.Bundle;
+import android.view.View;
+import android.widget.TextView;
+import android.widget.Toast;
 import androidx.annotation.NonNull;
 import androidx.recyclerview.widget.DefaultItemAnimator;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
-import android.view.View;
-import android.widget.TextView;
-import android.widget.Toast;
 import butterknife.BindView;
 import butterknife.ButterKnife;
 import butterknife.OnClick;
@@ -113,7 +113,8 @@ public class SongChooseActivity extends LibraryActivity<Song, SongChooseAdapter>
             .insertToPlayList(mAdapter.getCheckedSong(), mPlayListID)
             .compose(RxUtil.applySingleScheduler())
             .subscribe(num -> {
-              ToastUtil.show(mContext, getString(R.string.add_song_playlist_success, num, mPlayListName));
+              ToastUtil.show(mContext,
+                  getString(R.string.add_song_playlist_success, num, mPlayListName));
               finish();
             }, throwable -> finish());
     }
