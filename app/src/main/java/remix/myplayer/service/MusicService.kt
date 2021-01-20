@@ -367,9 +367,7 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
    */
   private var timer: Timer = Timer()
   private var desktopWidgetTask: WidgetTask? = null
-  private val lyricTask by lazy {
-    LyricTask()
-  }
+  private var lyricTask: LyricTask? = null
 
   /**
    * 创建桌面歌词悬浮窗
@@ -450,7 +448,7 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
   }
 
   override fun onSharedPreferenceChanged(sp: SharedPreferences, key: String) {
-    Timber.v("onSharedPreferenceChanged, key: $key")
+//    Timber.v("onSharedPreferenceChanged, key: $key")
     when (key) {
       //通知栏背景色
       SETTING_KEY.NOTIFY_SYSTEM_COLOR,
@@ -507,7 +505,6 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
       NotifyImpl(this)
     }
 
-
     //桌面部件
     appWidgets[APPWIDGET_BIG] = AppWidgetBig.getInstance()
     appWidgets[APPWIDGET_MEDIUM] = AppWidgetMedium.getInstance()
@@ -550,9 +547,6 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
         exitAfterCompletion = false
       }
     })
-
-    //桌面歌词与状态栏歌词
-    timer.schedule(lyricTask, LYRIC_FIND_INTERVAL, LYRIC_FIND_INTERVAL)
 
     setUpPlayer()
     setUpSession()
@@ -709,7 +703,7 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
 
     uiHandler.removeCallbacksAndMessages(null)
     showDesktopLyric = false
-    lyricTask.cancel()
+    lyricTask?.cancel()
 
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
       audioManager.abandonAudioFocusRequest(focusRequest!!)
@@ -1123,6 +1117,11 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
     updateAppwidget()
     updateNotification()
     updateMediaSession(operation)
+    //桌面歌词与状态栏歌词
+    if(lyricTask == null){
+      lyricTask = LyricTask()
+      timer.schedule(lyricTask, LYRIC_FIND_INTERVAL, LYRIC_FIND_INTERVAL)
+    }
     // 是否需要保存进度
     if (playAtBreakPoint) {
       startSaveProgress()
@@ -1303,7 +1302,7 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
       }
       //改变歌词源
       Command.CHANGE_LYRIC -> {
-        lyricTask.force = true
+        lyricTask?.force = true
 //        if (showDesktopLyric) {
 //          updateDesktopLyric(true)
 //        }
@@ -1659,7 +1658,7 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
   }
 
   fun setLyricOffset(offset: Int) {
-    lyricTask.lyricFetcher.offset = offset
+    lyricTask?.lyricFetcher?.offset = offset
   }
 
   private inner class LyricTask : TimerTask() {
@@ -1685,20 +1684,26 @@ class MusicService : BaseService(), Playback, MusicEventCallback,
         return
       }
 
+      // 桌面歌词
       val wrapper = lyricFetcher.findCurrentLyric()
+      Timber.tag(TAG_DESKTOP_LYRIC).v("findCurrentLyric: $wrapper")
       if (!showDesktopLyric || !screenOn || checkNoPermission() || isAppOnForeground()) {
         if (isDesktopLyricShowing) {
+          Timber.tag(TAG_DESKTOP_LYRIC).v("remove desktop lyric")
           uiHandler.sendEmptyMessage(REMOVE_DESKTOP_LRC)
         }
       } else {
         if (!isDesktopLyricShowing) {
+          Timber.tag(TAG_DESKTOP_LYRIC).v("create desktop lyric")
           uiHandler.removeMessages(CREATE_DESKTOP_LRC)
           uiHandler.sendEmptyMessageDelayed(CREATE_DESKTOP_LRC, 50)
         } else {
+          Timber.tag(TAG_DESKTOP_LYRIC).v("update desktop lyric")
           uiHandler.obtainMessage(UPDATE_DESKTOP_LRC_CONTENT, wrapper).sendToTarget()
         }
       }
 
+      // 状态栏歌词
       if (showStatusBarLyric) {
         if (TextUtils.equals(prev, wrapper.lineOne.content)) {
           return
